@@ -1,0 +1,4 @@
+playwright>=1.43
+fastapi>=0.111
+uvicorn[standard]>=0.29
+aiohttp>=3.9

@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "sonnenHeater",
+        "description": "Enter the URL of your running Sonnen scraper server.",
+        "data": {
+          "url": "Scraper server URL",
+          "scan_interval": "Poll interval (seconds)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the scraper server. Make sure server.py is running."
+    },
+    "abort": {
+      "already_configured": "sonnenHeater is already configured."
+    }
+  }
+}

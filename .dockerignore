@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+debug_page.html
+debug_screenshot.png
+custom_components/
+.git/

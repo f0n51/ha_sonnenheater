@@ -1,0 +1,17 @@
+services:
+  sonnen-scraper:
+    image: ghcr.io/f0n51/ha_sonnenheater:latest
+    build: .
+    env_file:
+      - .env          # copy .env.example → .env and fill in credentials
+    environment:
+      LOG_SCRAPED_DATA: "true"   # set to "true" to log every scraped payload to stdout
+    ports:
+      - "8099:8099"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8099/health')"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

@@ -1,0 +1,33 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Credentials
+.env
+
+# Debug output
+debug_page.html
+debug_screenshot.png
+
+# Scraper output
+*.json
+!hacs.json
+!custom_components/**/*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
