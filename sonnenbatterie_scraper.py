@@ -79,8 +79,19 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
                 pass  # SPA polls continuously; proceed after timeout
 
             # ── 3. Login if the login form is now visible ─────────────────────
+            # Use wait_for_selector so the SPA has time to render before we decide
+            # whether login is needed (instantaneous count() check was too early).
+            try:
+                await page.wait_for_selector(
+                    '[data-testid="login-email"], input[type="email"]',
+                    timeout=15_000,
+                )
+                login_form_visible = True
+            except PlaywrightTimeoutError:
+                login_form_visible = False  # already authenticated
+
             login_email = page.locator('[data-testid="login-email"], input[type="email"]')
-            if await login_email.count() > 0:
+            if login_form_visible:
                 _log.info("Login required — filling credentials ...")
 
                 # Dismiss cookie/consent banner if present
