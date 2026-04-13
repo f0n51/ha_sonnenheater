@@ -1,0 +1,37 @@
+{
+  "entity": {
+    "sensor": {
+      "heater_power": {
+        "name": "Heizleistung"
+      },
+      "heater_water_temp": {
+        "name": "Warmwasser-Temperatur"
+      },
+      "heater_max_temp": {
+        "name": "Maximale Temperatur"
+      },
+      "heater_state": {
+        "name": "Heizstab-Status",
+        "state": {
+          "active": "Aktiv",
+          "inactive": "Inaktiv"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "sonnenHeater",
+        "description": "URL oder Abfrageintervall des Sonnen-Scraper-Servers aktualisieren.",
+        "data": {
+          "url": "Scraper-Server-URL",
+          "scan_interval": "Abfrageintervall (Sekunden)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Verbindung zum Scraper-Server fehlgeschlagen. Stellen Sie sicher, dass server.py läuft."
+    }
+  }
+}
