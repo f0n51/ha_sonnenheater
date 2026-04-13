@@ -120,6 +120,8 @@ The `custom_components/sonnenheater/` folder is a HA custom integration that rea
 6. Go to **Settings → Devices & Services → Add Integration** and search for **Sonnen Heater**.
 7. Enter the server URL (e.g. `http://192.168.1.100:8099/data`) and the poll interval.
 
+To change the server URL or poll interval later, click Configure on the Sonnen Heater integration card.
+
 <details>
 <summary>Manual installation</summary>
 
