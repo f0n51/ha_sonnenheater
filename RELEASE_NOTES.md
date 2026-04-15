@@ -1,8 +1,8 @@
 # Release Notes
 
-## v1.0.1 — Reliability & Reconfiguration
+## v1.1.0 — Reliability & Reconfiguration
 
-**Released:** 2026-04-13
+**Released:** 2026-04-15
 
 ### Bug fixes
 
