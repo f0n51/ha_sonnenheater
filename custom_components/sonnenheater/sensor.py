@@ -37,6 +37,7 @@ class SonnenSensorEntityDescription(SensorEntityDescription):
 SENSORS: tuple[SonnenSensorEntityDescription, ...] = (
     SonnenSensorEntityDescription(
         key="heater_power",
+        translation_key="heater_power",
         name="Heater Power",
         data_path=("sonnen_heater", "power"),
         device_class=SensorDeviceClass.POWER,
@@ -46,24 +47,29 @@ SENSORS: tuple[SonnenSensorEntityDescription, ...] = (
     ),
     SonnenSensorEntityDescription(
         key="heater_water_temp",
+        translation_key="heater_water_temp",
         name="Heater Water Temperature",
         data_path=("sonnen_heater", "water_temperature"),
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        suggested_unit_of_measurement=UnitOfTemperature.CELSIUS,
         suggested_display_precision=1,
     ),
     SonnenSensorEntityDescription(
         key="heater_max_temp",
+        translation_key="heater_max_temp",
         name="Heater Max Temperature",
         data_path=("sonnen_heater", "max_temperature"),
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        suggested_unit_of_measurement=UnitOfTemperature.CELSIUS,
         suggested_display_precision=1,
     ),
     SonnenSensorEntityDescription(
         key="heater_state",
+        translation_key="heater_state",
         name="Heater State",
         data_path=("sonnen_heater", "state"),
         parse_numeric=False,
@@ -125,7 +131,7 @@ class SonnenSensor(CoordinatorEntity, SensorEntity):
         info = (self.coordinator.data or {}).get("battery_info", {})
         return DeviceInfo(
             identifiers={(DOMAIN, DOMAIN)},
-            name="Sonnen Heater",
+            name="sonnenHeater",
             manufacturer="sonnen",
             model=info.get("model", "sonnenHeater"),
             serial_number=info.get("serial_number"),

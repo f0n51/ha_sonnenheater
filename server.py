@@ -27,6 +27,11 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 from sonnenbatterie_scraper import scrape
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
 _log = logging.getLogger(__name__)
 
 import json
@@ -57,6 +62,15 @@ async def _poll_loop() -> None:
             _cache.clear()
             _cache.update(data)
             _log.info("Scrape complete. timestamp=%s", _cache.get("timestamp"))
+            if not data.get("battery_info") and not data.get("sonnen_heater"):
+                _log.warning(
+                    "Scrape returned empty data — both battery_info and sonnen_heater are empty. "
+                    "Captured API URLs may have been missing. Check scraper logs above."
+                )
+            elif not data.get("battery_info"):
+                _log.warning("Scrape returned empty battery_info.")
+            elif not data.get("sonnen_heater"):
+                _log.warning("Scrape returned empty sonnen_heater.")
             if LOG_SCRAPED_DATA:
                 _log.info("Scraped data:\n%s", json.dumps(data, indent=2, ensure_ascii=False))
         except Exception as exc:  # noqa: BLE001

@@ -22,6 +22,7 @@ Usage:
 
 import asyncio
 import json
+import logging
 import os
 import sys
 import argparse
@@ -29,6 +30,7 @@ from datetime import datetime
 
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
+_log = logging.getLogger(__name__)
 
 OVERVIEW_URL = "https://my.sonnen.de/battery/overview"
 
@@ -66,9 +68,9 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
 
         try:
             # ── 1. Open page (redirects to login when unauthenticated) ───────
-            print(f"Opening {OVERVIEW_URL} ...")
+            _log.info("Opening %s ...", OVERVIEW_URL)
             await page.goto(OVERVIEW_URL, wait_until="domcontentloaded", timeout=30_000)
-            print(f"Landed on: {page.url}")
+            _log.info("Landed on: %s", page.url)
 
             # ── 2. Wait for the SPA to render its initial state ──────────────
             try:
@@ -77,9 +79,20 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
                 pass  # SPA polls continuously; proceed after timeout
 
             # ── 3. Login if the login form is now visible ─────────────────────
+            # Use wait_for_selector so the SPA has time to render before we decide
+            # whether login is needed (instantaneous count() check was too early).
+            try:
+                await page.wait_for_selector(
+                    '[data-testid="login-email"], input[type="email"]',
+                    timeout=15_000,
+                )
+                login_form_visible = True
+            except PlaywrightTimeoutError:
+                login_form_visible = False  # already authenticated
+
             login_email = page.locator('[data-testid="login-email"], input[type="email"]')
-            if await login_email.count() > 0:
-                print("Login required — filling credentials ...")
+            if login_form_visible:
+                _log.info("Login required — filling credentials ...")
 
                 # Dismiss cookie/consent banner if present
                 try:
@@ -103,7 +116,7 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
                     await page.locator(
                         '[data-testid="login-submit-btn"], input[type="submit"], button[type="submit"]'
                     ).first.click()
-                print("Credentials submitted — waiting for page to reload ...")
+                _log.info("Credentials submitted — waiting for page to reload ...")
                 # SPA polls continuously so networkidle may never fire; wait for load instead
                 await page.wait_for_load_state("load", timeout=30_000)
 
@@ -113,7 +126,7 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
                 await page.wait_for_load_state("load", timeout=30_000)
 
             # ── 5. Wait until the API responses we need have been captured ───────
-            print("Waiting for API responses ...")
+            _log.info("Waiting for API responses (battery-systems + live-state) ...")
             deadline = asyncio.get_event_loop().time() + 20
             while asyncio.get_event_loop().time() < deadline:
                 has_battery = any("battery-systems" in u for u in api_data)
@@ -123,7 +136,15 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
                 await asyncio.sleep(0.5)
             else:
                 captured = list(api_data.keys())
-                print(f"Warning: timed out waiting for API data. Captured URLs: {captured}")
+                missing = []
+                if not any("battery-systems" in u for u in api_data):
+                    missing.append("battery-systems")
+                if not any("live-state" in u for u in api_data):
+                    missing.append("live-state")
+                _log.warning(
+                    "Timed out waiting for API data. Missing: %s. Captured URLs: %s",
+                    missing, captured
+                )
 
             # ── 6. Debug snapshot ─────────────────────────────────────────────
             if debug:
@@ -131,10 +152,10 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
                 with open("debug_page.html", "w", encoding="utf-8") as fh:
                     fh.write(html)
                 await page.screenshot(path="debug_screenshot.png", full_page=True)
-                print("Debug: saved debug_page.html and debug_screenshot.png")
+                _log.debug("Saved debug_page.html and debug_screenshot.png")
 
             # ── 7. Extract data from captured API responses ───────────────────
-            print(f"Extracting values ... (captured {len(api_data)} API response(s): {list(api_data.keys())})")
+            _log.info("Extracting values ... (captured %d API response(s): %s)", len(api_data), list(api_data.keys()))
 
             battery_systems_data = None
             live_state_data = None
@@ -146,6 +167,11 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
 
             battery_info = {}
             sonnen_heater = {}
+
+            if not battery_systems_data:
+                _log.warning("No battery-systems API response captured — battery_info will be empty.")
+            if not live_state_data:
+                _log.warning("No live-state API response captured — sonnen_heater data will be empty.")
 
             if battery_systems_data:
                 items = battery_systems_data.get("data") or []
@@ -189,7 +215,7 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
                 "timestamp":      datetime.now().isoformat(),
             }
 
-            print("Done.")
+            _log.info("Scrape done. battery_info keys: %s, sonnen_heater keys: %s", list(battery_info.keys()), list(sonnen_heater.keys()))
             return result
 
         except PlaywrightTimeoutError as exc:
