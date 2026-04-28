@@ -27,6 +27,9 @@ dist/
 build/
 *.egg-info/
 
+# Local Docker overrides
+docker-compose.override.yml
+
 # IDE
 .vscode/
 .idea/

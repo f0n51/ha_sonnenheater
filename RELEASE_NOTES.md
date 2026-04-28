@@ -1,5 +1,13 @@
 # Release Notes
 
+## v1.1.1 — Bugfix
+
+**Released:** 2026-04-28
+
+### Bug fixes
+
+- **Scraper no longer gets stuck on portal downtime or empty responses** ([#2](https://github.com/f0n51/ha_sonnenheater/issues/2)) — added `SCRAPE_TIMEOUT` enforcement via `asyncio.wait_for`; a hung Playwright session is now forcibly cancelled after the configured timeout, the error is written to the cache, and the poll loop continues normally.
+
 ## v1.1.0 — Reliability & Reconfiguration
 
 **Released:** 2026-04-15

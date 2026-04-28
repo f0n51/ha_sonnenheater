@@ -36,7 +36,8 @@ _log = logging.getLogger(__name__)
 
 import json
 
-POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))
+POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SECONDS", "120"))
+SCRAPE_TIMEOUT = int(os.environ.get("SCRAPE_TIMEOUT_SECONDS", "120"))
 SERVER_PORT = int(os.environ.get("SERVER_PORT", "8099"))
 SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
 LOG_SCRAPED_DATA = os.environ.get("LOG_SCRAPED_DATA", "").lower() in ("1", "true", "yes")
@@ -58,7 +59,7 @@ async def _poll_loop() -> None:
     while True:
         _log.info("Starting scrape …")
         try:
-            data = await scrape(username, password)
+            data = await asyncio.wait_for(scrape(username, password), timeout=SCRAPE_TIMEOUT)
             _cache.clear()
             _cache.update(data)
             _log.info("Scrape complete. timestamp=%s", _cache.get("timestamp"))
@@ -74,8 +75,13 @@ async def _poll_loop() -> None:
             if LOG_SCRAPED_DATA:
                 _log.info("Scraped data:\n%s", json.dumps(data, indent=2, ensure_ascii=False))
         except Exception as exc:  # noqa: BLE001
-            _log.error("Scrape failed: %s", exc)
-            _cache["error"] = str(exc)
+            if isinstance(exc, asyncio.TimeoutError):
+                _log.error("Scrape timed out after %s s — Playwright likely hung. Retrying after sleep.", SCRAPE_TIMEOUT)
+            else:
+                _log.error("Scrape failed: %s", exc)
+            _cache.clear()
+            _cache["error"] = str(exc) if not isinstance(exc, asyncio.TimeoutError) else f"Scrape timed out after {SCRAPE_TIMEOUT}s"
+            _cache["timestamp"] = datetime.now(timezone.utc).isoformat()
         await asyncio.sleep(POLL_INTERVAL)
 
 
