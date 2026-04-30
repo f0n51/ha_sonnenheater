@@ -1,10 +1,18 @@
 # Release Notes
 
-## v1.1.1 — Bugfix
+## v1.1.2 — Bugfix (Playwright Version)
+
+**Released:** 2026-04-30
+
+### Bug fix
+
+- **Playwright / Chromium dies with SIGTRAP** ([#4](https://github.com/f0n51/ha_sonnenheater/issues/4)) — bumped Playwright version to 1.58.0 in requirements.txt to match the docker container's Playwright version.
+
+## v1.1.1 — Bugfix (Scraper)
 
 **Released:** 2026-04-28
 
-### Bug fixes
+### Bug fix
 
 - **Scraper no longer gets stuck on portal downtime or empty responses** ([#2](https://github.com/f0n51/ha_sonnenheater/issues/2)) — added `SCRAPE_TIMEOUT` enforcement via `asyncio.wait_for`; a hung Playwright session is now forcibly cancelled after the configured timeout, the error is written to the cache, and the poll loop continues normally.
 
