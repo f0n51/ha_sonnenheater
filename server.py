@@ -10,7 +10,7 @@ Usage:
     python server.py
 
 Optional env vars:
-    POLL_INTERVAL_SECONDS   How often to re-scrape (default: 300)
+    POLL_INTERVAL_SECONDS   How often to re-scrape (default: 120)
     SERVER_PORT             TCP port to listen on  (default: 8099)
     SERVER_HOST             Bind address           (default: 0.0.0.0)
 """

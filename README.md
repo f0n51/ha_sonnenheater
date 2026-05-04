@@ -258,7 +258,7 @@ python sonnenbatterie_scraper.py -u your@email.com -p YourPassword --visible
 |---|---|---|
 | `SONNEN_USERNAME` | — | Login e-mail (required) |
 | `SONNEN_PASSWORD` | — | Login password (required) |
-| `POLL_INTERVAL_SECONDS` | `300` | How often to re-scrape (seconds) |
+| `POLL_INTERVAL_SECONDS` | `120` | How often to re-scrape (seconds) |
 | `SERVER_PORT` | `8099` | TCP port the server listens on |
 | `SERVER_HOST` | `0.0.0.0` | Bind address |
 | `LOG_SCRAPED_DATA` | `false` | Set to `true` to log the full scraped payload to stdout after each poll |
