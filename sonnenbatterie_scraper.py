@@ -2,7 +2,7 @@
 """
 Sonnen Battery Web Scraper
 
-Authenticates at my.sonnen.de and extracts battery status and
+Authenticates at my.sonnen.de and extracts battery info and
 sonnenHeater values from the battery overview page.
 
 Setup:
@@ -24,7 +24,6 @@ import asyncio
 import json
 import logging
 import os
-import sys
 import argparse
 from datetime import datetime
 
@@ -78,47 +77,48 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
             except PlaywrightTimeoutError:
                 pass  # SPA polls continuously; proceed after timeout
 
-            # ── 3. Login if the login form is now visible ─────────────────────
-            # Use wait_for_selector so the SPA has time to render before we decide
-            # whether login is needed (instantaneous count() check was too early).
+            # ── 3. Wait for login form and authenticate ───────────────────────
+            # A fresh browser context has no session — the login form must appear.
+            # Abort if it hasn't rendered within 15 s (e.g. network issue or page change).
             try:
                 await page.wait_for_selector(
                     '[data-testid="login-email"], input[type="email"]',
                     timeout=15_000,
                 )
-                login_form_visible = True
             except PlaywrightTimeoutError:
-                login_form_visible = False  # already authenticated
+                raise RuntimeError(
+                    f"Login form did not appear within 15 s on {page.url!r} — "
+                    "cannot authenticate; aborting scrape."
+                )
 
+            _log.info("Login required — filling credentials ...")
             login_email = page.locator('[data-testid="login-email"], input[type="email"]')
-            if login_form_visible:
-                _log.info("Login required — filling credentials ...")
 
-                # Dismiss cookie/consent banner if present
-                try:
-                    consent = page.locator(
-                        "#onetrust-accept-btn-handler, "
-                        "button:has-text('Akzeptieren'), "
-                        "button:has-text('Accept All')"
-                    )
-                    if await consent.count() > 0:
-                        await consent.first.click()
-                        await page.wait_for_timeout(500)
-                except Exception:
-                    pass
+            # Dismiss cookie/consent banner if present
+            try:
+                consent = page.locator(
+                    "#onetrust-accept-btn-handler, "
+                    "button:has-text('Akzeptieren'), "
+                    "button:has-text('Accept All')"
+                )
+                if await consent.count() > 0:
+                    await consent.first.click()
+                    await page.wait_for_timeout(500)
+            except Exception:
+                pass
 
-                await login_email.first.fill(username)
+            await login_email.first.fill(username)
+            await page.locator(
+                '[data-testid="login-password"], input[type="password"]'
+            ).first.fill(password)
+
+            async with page.expect_navigation(wait_until="domcontentloaded", timeout=30_000):
                 await page.locator(
-                    '[data-testid="login-password"], input[type="password"]'
-                ).first.fill(password)
-
-                async with page.expect_navigation(wait_until="domcontentloaded", timeout=30_000):
-                    await page.locator(
-                        '[data-testid="login-submit-btn"], input[type="submit"], button[type="submit"]'
-                    ).first.click()
-                _log.info("Credentials submitted — waiting for page to reload ...")
-                # SPA polls continuously so networkidle may never fire; wait for load instead
-                await page.wait_for_load_state("load", timeout=30_000)
+                    '[data-testid="login-submit-btn"], input[type="submit"], button[type="submit"]'
+                ).first.click()
+            _log.info("Credentials submitted — waiting for page to reload ...")
+            # SPA polls continuously so networkidle may never fire; wait for load instead
+            await page.wait_for_load_state("load", timeout=30_000)
 
             # ── 4. Navigate to overview if we ended up elsewhere ─────────────
             if "battery/overview" not in page.url:
