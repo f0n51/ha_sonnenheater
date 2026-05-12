@@ -44,8 +44,13 @@ OVERVIEW_URL = "https://my.sonnen.de/battery/overview"
 async def scrape(username: str, password: str, headless: bool = True, debug: bool = False) -> dict:
     """Login to my.sonnen.de and return scraped battery overview data as a dict."""
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
+    # Use manual start/stop instead of async-with so we can apply timeouts to
+    # both browser.close() and pw.stop() — if Chromium hangs, the async-with
+    # __aexit__ can block indefinitely and leave zombie processes.
+    pw = await async_playwright().start()
+    browser = None
+    try:
+        browser = await pw.chromium.launch(headless=headless)
         context = await browser.new_context(
             locale="de-DE",
             viewport={"width": 1280, "height": 900},
@@ -222,8 +227,18 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
             return {"error": f"Timeout: {exc}", "timestamp": datetime.now().isoformat()}
         except Exception as exc:
             return {"error": str(exc), "timestamp": datetime.now().isoformat()}
-        finally:
-            await browser.close()
+    finally:
+        # Always attempt cleanup with hard timeouts so a hung browser or
+        # playwright server can never block this coroutine indefinitely.
+        if browser is not None:
+            try:
+                await asyncio.wait_for(browser.close(), timeout=10.0)
+            except Exception:
+                pass
+        try:
+            await asyncio.wait_for(pw.stop(), timeout=10.0)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------

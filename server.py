@@ -18,6 +18,8 @@ Optional env vars:
 import asyncio
 import logging
 import os
+import subprocess
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -46,6 +48,26 @@ _cache: dict = {"error": "First scrape still pending — please wait."}
 _started_at: str = datetime.now(timezone.utc).isoformat()
 
 
+def _kill_stale_browsers() -> None:
+    """Kill any lingering headless Chromium processes left by a hung scrape.
+
+    Safe to call unconditionally; a non-zero pkill exit code just means there
+    were no matching processes, which is the expected case after clean scrapes.
+    """
+    if sys.platform == "win32":
+        return  # Not applicable outside Docker/Linux
+    try:
+        result = subprocess.run(
+            ["pkill", "-9", "-f", "chrome-headless-shell"],
+            capture_output=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            _log.warning("Killed stale chrome-headless-shell process(es).")
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("pkill chrome-headless-shell: %s", exc)
+
+
 async def _poll_loop() -> None:
     username = os.environ.get("SONNEN_USERNAME", "")
     password = os.environ.get("SONNEN_PASSWORD", "")
@@ -57,9 +79,21 @@ async def _poll_loop() -> None:
         return
 
     while True:
+        # Ensure no leftover Chromium from a previous hung/incomplete cleanup
+        # exists before we try to launch a fresh browser.  This is a no-op on
+        # the happy path (pkill returns non-zero when nothing matches).
+        _kill_stale_browsers()
         _log.info("Starting scrape …")
+        # Create an explicit task so we can manage its lifecycle independently
+        # of asyncio.wait_for's cancellation.  asyncio.shield() prevents the
+        # wait_for timeout from propagating a CancelledError directly into the
+        # task; instead we cancel it ourselves after the timeout and then wait
+        # for its finally-block cleanup to finish before pkill-ing any leftovers.
+        scrape_task = asyncio.create_task(scrape(username, password))
         try:
-            data = await asyncio.wait_for(scrape(username, password), timeout=SCRAPE_TIMEOUT)
+            data = await asyncio.wait_for(
+                asyncio.shield(scrape_task), timeout=SCRAPE_TIMEOUT
+            )
             _cache.clear()
             _cache.update(data)
             _log.info("Scrape complete. timestamp=%s", _cache.get("timestamp"))
@@ -74,13 +108,38 @@ async def _poll_loop() -> None:
                 _log.warning("Scrape returned empty sonnen_heater.")
             if LOG_SCRAPED_DATA:
                 _log.info("Scraped data:\n%s", json.dumps(data, indent=2, ensure_ascii=False))
-        except Exception as exc:  # noqa: BLE001
-            if isinstance(exc, asyncio.TimeoutError):
-                _log.error("Scrape timed out after %s s — Playwright likely hung. Retrying after sleep.", SCRAPE_TIMEOUT)
-            else:
-                _log.error("Scrape failed: %s", exc)
+        except asyncio.TimeoutError:
+            _log.error(
+                "Scrape timed out after %s s — Playwright likely hung. "
+                "Cancelling task and waiting for browser cleanup...",
+                SCRAPE_TIMEOUT,
+            )
+            scrape_task.cancel()
+            try:
+                # Give the task's finally-block (browser.close + pw.stop) time
+                # to finish; the scraper already applies 10 s timeouts on each.
+                await asyncio.wait_for(scrape_task, timeout=25)
+            except asyncio.TimeoutError:
+                _log.warning("Browser cleanup itself timed out — force-killing stale processes.")
+            except asyncio.CancelledError:
+                pass  # Expected: task accepted the cancellation
+            except Exception as cleanup_exc:  # noqa: BLE001
+                _log.warning("Cleanup error after timeout: %s", cleanup_exc)
+            _kill_stale_browsers()
             _cache.clear()
-            _cache["error"] = str(exc) if not isinstance(exc, asyncio.TimeoutError) else f"Scrape timed out after {SCRAPE_TIMEOUT}s"
+            _cache["error"] = f"Scrape timed out after {SCRAPE_TIMEOUT}s"
+            _cache["timestamp"] = datetime.now(timezone.utc).isoformat()
+        except Exception as exc:  # noqa: BLE001
+            _log.error("Scrape failed: %s", exc)
+            if not scrape_task.done():
+                scrape_task.cancel()
+                try:
+                    await asyncio.wait_for(scrape_task, timeout=25)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    pass
+                _kill_stale_browsers()
+            _cache.clear()
+            _cache["error"] = str(exc)
             _cache["timestamp"] = datetime.now(timezone.utc).isoformat()
         await asyncio.sleep(POLL_INTERVAL)
 
