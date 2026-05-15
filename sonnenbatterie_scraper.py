@@ -50,27 +50,29 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
     pw = await async_playwright().start()
     browser = None
     try:
+        _log.info("Launching Chromium browser ...")
         browser = await pw.chromium.launch(headless=headless)
         context = await browser.new_context(
             locale="de-DE",
             viewport={"width": 1280, "height": 900},
         )
-        page = await context.new_page()
 
         # Capture JSON API responses for transparency / future use
         api_data: dict = {}
 
-        async def _capture_response(response):
-            if response.status == 200 and "sonnen.de" in response.url:
-                if "json" in response.headers.get("content-type", ""):
-                    try:
-                        api_data[response.url] = await response.json()
-                    except Exception:
-                        pass
-
-        page.on("response", _capture_response)
-
         try:
+            page = await context.new_page()
+
+            async def _capture_response(response):
+                if response.status == 200 and "sonnen.de" in response.url:
+                    if "json" in response.headers.get("content-type", ""):
+                        try:
+                            api_data[response.url] = await response.json()
+                        except Exception:
+                            pass
+
+            page.on("response", _capture_response)
+
             # ── 1. Open page (redirects to login when unauthenticated) ───────
             _log.info("Opening %s ...", OVERVIEW_URL)
             await page.goto(OVERVIEW_URL, wait_until="domcontentloaded", timeout=30_000)
@@ -228,17 +230,31 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
         except Exception as exc:
             return {"error": str(exc), "timestamp": datetime.now().isoformat()}
     finally:
-        # Always attempt cleanup with hard timeouts so a hung browser or
-        # playwright server can never block this coroutine indefinitely.
-        if browser is not None:
+        # Schedule cleanup as an independent asyncio task so it is never
+        # interrupted by CancelledError.  When this coroutine is cancelled
+        # (e.g. by server.py's scrape timeout), a CancelledError is thrown
+        # into every subsequent `await` inside a `finally` block, and
+        # `except Exception: pass` does NOT catch it (Python 3.8+
+        # CancelledError is BaseException).  Running cleanup in a separate
+        # task avoids that problem: the task is not cancelled along with the
+        # parent, so browser.close() and pw.stop() always run to completion.
+        _b, _p = browser, pw
+
+        async def _close():
+            if _b is not None:
+                try:
+                    await asyncio.wait_for(_b.close(), timeout=10.0)
+                except Exception:
+                    pass
             try:
-                await asyncio.wait_for(browser.close(), timeout=10.0)
+                await asyncio.wait_for(_p.stop(), timeout=10.0)
             except Exception:
                 pass
+
         try:
-            await asyncio.wait_for(pw.stop(), timeout=10.0)
-        except Exception:
-            pass
+            asyncio.get_running_loop().create_task(_close())
+        except RuntimeError:
+            pass  # event loop already closed — nothing we can do
 
 
 # ---------------------------------------------------------------------------

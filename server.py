@@ -49,23 +49,28 @@ _started_at: str = datetime.now(timezone.utc).isoformat()
 
 
 def _kill_stale_browsers() -> None:
-    """Kill any lingering headless Chromium processes left by a hung scrape.
+    """Kill lingering Chromium and Playwright driver processes left by a hung scrape.
 
-    Safe to call unconditionally; a non-zero pkill exit code just means there
-    were no matching processes, which is the expected case after clean scrapes.
+    The Playwright Python driver starts a node.js subprocess.  If cleanup is
+    interrupted (e.g. by asyncio cancellation), that process keeps running and
+    causes subsequent browser launches to hang or fail with
+    "BrowserContext.new_page: Target page, context or browser has been closed".
+
+    Safe to call unconditionally; pkill returns non-zero when nothing matches.
     """
     if sys.platform == "win32":
         return  # Not applicable outside Docker/Linux
-    try:
-        result = subprocess.run(
-            ["pkill", "-9", "-f", "chrome-headless-shell"],
-            capture_output=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            _log.warning("Killed stale chrome-headless-shell process(es).")
-    except Exception as exc:  # noqa: BLE001
-        _log.debug("pkill chrome-headless-shell: %s", exc)
+    for pattern in ("chrome-headless-shell", "playwright/driver/node"):
+        try:
+            result = subprocess.run(
+                ["pkill", "-9", "-f", pattern],
+                capture_output=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                _log.warning("Killed stale '%s' process(es).", pattern)
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("pkill '%s': %s", pattern, exc)
 
 
 async def _poll_loop() -> None:
