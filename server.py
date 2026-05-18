@@ -75,6 +75,12 @@ async def _poll_loop() -> None:
                 # Wait for the process with a timeout
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=SCRAPE_TIMEOUT)
                 
+                # Stream stderr out to our server's logs
+                scraper_stderr = stderr.decode(errors="replace").strip()
+                if scraper_stderr:
+                    for line in scraper_stderr.splitlines():
+                        _log.info("[scraper] %s", line)
+
                 if process.returncode != 0:
                     _log.error("Scraper process failed (exit code %s).", process.returncode)
                     _log.error("--- STDERR ---\n%s", stderr.decode(errors="replace").strip())

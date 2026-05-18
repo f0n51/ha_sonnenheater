@@ -78,47 +78,43 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
             except PlaywrightTimeoutError:
                 pass  # SPA polls continuously; proceed after timeout
 
-            # ── 3. Login if the login form is now visible ─────────────────────
-            # Use wait_for_selector so the SPA has time to render before we decide
-            # whether login is needed (instantaneous count() check was too early).
-            try:
-                await page.wait_for_selector(
-                    '[data-testid="login-email"], input[type="email"]',
-                    timeout=15_000,
-                )
-                login_form_visible = True
-            except PlaywrightTimeoutError:
-                login_form_visible = False  # already authenticated
+            # ── 3. Authenticate ───────────────────────────────────────────────
+            _log.info("Waiting for login form ...")
+            # The context is always fresh, so we strictly require the login form to appear.
+            # If this times out, the script will naturally raise PlaywrightTimeoutError and exit.
+            await page.wait_for_selector(
+                '[data-testid="login-email"], input[type="email"]',
+                timeout=15_000,
+            )
 
             login_email = page.locator('[data-testid="login-email"], input[type="email"]')
-            if login_form_visible:
-                _log.info("Login required — filling credentials ...")
+            _log.info("Filling credentials ...")
 
-                # Dismiss cookie/consent banner if present
-                try:
-                    consent = page.locator(
-                        "#onetrust-accept-btn-handler, "
-                        "button:has-text('Akzeptieren'), "
-                        "button:has-text('Accept All')"
-                    )
-                    if await consent.count() > 0:
-                        await consent.first.click()
-                        await page.wait_for_timeout(500)
-                except Exception:
-                    pass
+            # Dismiss cookie/consent banner if present
+            try:
+                consent = page.locator(
+                    "#onetrust-accept-btn-handler, "
+                    "button:has-text('Akzeptieren'), "
+                    "button:has-text('Accept All')"
+                )
+                if await consent.count() > 0:
+                    await consent.first.click()
+                    await page.wait_for_timeout(500)
+            except Exception:
+                pass
 
-                await login_email.first.fill(username)
+            await login_email.first.fill(username)
+            await page.locator(
+                '[data-testid="login-password"], input[type="password"]'
+            ).first.fill(password)
+
+            async with page.expect_navigation(wait_until="domcontentloaded", timeout=30_000):
                 await page.locator(
-                    '[data-testid="login-password"], input[type="password"]'
-                ).first.fill(password)
-
-                async with page.expect_navigation(wait_until="domcontentloaded", timeout=30_000):
-                    await page.locator(
-                        '[data-testid="login-submit-btn"], input[type="submit"], button[type="submit"]'
-                    ).first.click()
-                _log.info("Credentials submitted — waiting for page to reload ...")
-                # SPA polls continuously so networkidle may never fire; wait for load instead
-                await page.wait_for_load_state("load", timeout=30_000)
+                    '[data-testid="login-submit-btn"], input[type="submit"], button[type="submit"]'
+                ).first.click()
+            _log.info("Credentials submitted — waiting for page to reload ...")
+            # SPA polls continuously so networkidle may never fire; wait for load instead
+            await page.wait_for_load_state("load", timeout=30_000)
 
             # ── 4. Navigate to overview if we ended up elsewhere ─────────────
             if "battery/overview" not in page.url:
@@ -223,8 +219,7 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
         except Exception as exc:
             return {"error": str(exc), "timestamp": datetime.now().isoformat()}
         finally:
-            if browser:
-                await browser.close()
+            await browser.close()
 
 
 # ---------------------------------------------------------------------------
