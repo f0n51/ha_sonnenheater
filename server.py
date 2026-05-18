@@ -83,11 +83,18 @@ async def _poll_loop() -> None:
         )
         return
 
+    loop = asyncio.get_event_loop()
+
     while True:
+        loop_start = loop.time()
         # Ensure no leftover Chromium from a previous hung/incomplete cleanup
         # exists before we try to launch a fresh browser.  This is a no-op on
         # the happy path (pkill returns non-zero when nothing matches).
         _kill_stale_browsers()
+        # Brief pause after pkill so the OS can release thread slots before
+        # we attempt a new browser launch — avoids pthread_create errors when
+        # killed processes have not yet fully exited.
+        await asyncio.sleep(2)
         _log.info("Starting scrape …")
         # Create an explicit task so we can manage its lifecycle independently
         # of asyncio.wait_for's cancellation.  asyncio.shield() prevents the
@@ -102,6 +109,8 @@ async def _poll_loop() -> None:
             _cache.clear()
             _cache.update(data)
             _log.info("Scrape complete. timestamp=%s", _cache.get("timestamp"))
+            if "error" in data:
+                _log.warning("Scrape returned an internal error: %s", data["error"])
             if not data.get("battery_info") and not data.get("sonnen_heater"):
                 _log.warning(
                     "Scrape returned empty data — both battery_info and sonnen_heater are empty. "
@@ -113,7 +122,7 @@ async def _poll_loop() -> None:
                 _log.warning("Scrape returned empty sonnen_heater.")
             if LOG_SCRAPED_DATA:
                 _log.info("Scraped data:\n%s", json.dumps(data, indent=2, ensure_ascii=False))
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError:  # noqa: UP041 — caught before bare Exception below
             _log.error(
                 "Scrape timed out after %s s — Playwright likely hung. "
                 "Cancelling task and waiting for browser cleanup...",
@@ -146,7 +155,15 @@ async def _poll_loop() -> None:
             _cache.clear()
             _cache["error"] = str(exc)
             _cache["timestamp"] = datetime.now(timezone.utc).isoformat()
-        await asyncio.sleep(POLL_INTERVAL)
+        # Always yield to the event loop so the scraper's fire-and-forget
+        # _close() cleanup task (which calls pw.stop()) has time to finish
+        # before we run pkill.  Without this yield the task may not have
+        # started yet when _kill_stale_browsers() runs, leaving zombie
+        # Playwright driver processes that cause the next launch to fail.
+        await asyncio.sleep(15)
+        _kill_stale_browsers()
+        elapsed = loop.time() - loop_start
+        await asyncio.sleep(max(0, POLL_INTERVAL - elapsed))
 
 
 @asynccontextmanager
