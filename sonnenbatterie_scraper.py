@@ -223,7 +223,8 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
         except Exception as exc:
             return {"error": str(exc), "timestamp": datetime.now().isoformat()}
         finally:
-            await browser.close()
+            if browser:
+                await browser.close()
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +277,14 @@ Environment variables (alternative to flags):
             "Pass --username/-u and --password/-p, "
             "or set SONNEN_USERNAME / SONNEN_PASSWORD environment variables."
         )
+
+    # Configure logging to stderr so it doesn't pollute JSON stdout
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
 
     data = asyncio.run(scrape(username, password, headless=not args.visible, debug=args.debug))
 
