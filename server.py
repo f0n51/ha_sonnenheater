@@ -18,6 +18,7 @@ Optional env vars:
 import asyncio
 import logging
 import os
+import signal
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -36,6 +37,13 @@ logging.basicConfig(
 _log = logging.getLogger(__name__)
 
 import json
+
+# On POSIX (Linux/Docker) we can kill the entire process group so orphaned
+# Chromium children don't accumulate and exhaust memory after repeated timeouts.
+_IS_POSIX = hasattr(os, "killpg")
+_killpg = getattr(os, "killpg", None)      # POSIX only
+_SIGTERM = getattr(signal, "SIGTERM", 15)  # always present, but satisfy type checker
+_SIGKILL = getattr(signal, "SIGKILL", 9)   # POSIX only
 
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SECONDS", "120"))
 SCRAPE_TIMEOUT = int(os.environ.get("SCRAPE_TIMEOUT_SECONDS", "60"))
@@ -63,13 +71,23 @@ async def _poll_loop() -> None:
     while True:
         _log.info("Starting isolated scrape process...")
         try:
-            # Launch scraper as an isolated subprocess
-            process = await asyncio.create_subprocess_exec(
-                sys.executable, "sonnenbatterie_scraper.py",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env
-            )
+            # Launch scraper in its own process group (POSIX) so that
+            # a timeout kill reaches Chromium children too.
+            if _IS_POSIX:
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable, "sonnenbatterie_scraper.py",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
+                    start_new_session=True,
+                )
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable, "sonnenbatterie_scraper.py",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
+                )
 
             try:
                 # Wait for the process with a timeout
@@ -109,14 +127,30 @@ async def _poll_loop() -> None:
                     _log.info("Scraped data:\n%s", json.dumps(data, indent=2, ensure_ascii=False))
 
             except asyncio.TimeoutError:
-                _log.error("Scrape timed out after %s s — killing subprocess...", SCRAPE_TIMEOUT)
+                _log.error("Scrape timed out after %s s — killing subprocess tree...", SCRAPE_TIMEOUT)
+                pgid = process.pid  # start_new_session=True → pgid == pid on POSIX
                 try:
-                    process.terminate()  # Ask Playwright to close cleanly
+                    if _IS_POSIX and _killpg:
+                        try:
+                            _killpg(pgid, _SIGTERM)
+                        except ProcessLookupError:
+                            pass
+                    else:
+                        process.terminate()
                     await asyncio.wait_for(process.wait(), timeout=10.0)
                 except asyncio.TimeoutError:
-                    _log.warning("Process ignored SIGTERM, forcing SIGKILL...")
-                    process.kill()
-                    await process.wait()
+                    _log.warning("Subprocess tree ignored SIGTERM, forcing SIGKILL...")
+                    try:
+                        if _IS_POSIX and _killpg:
+                            _killpg(pgid, _SIGKILL)
+                        else:
+                            process.kill()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        _log.warning("Subprocess still alive after SIGKILL — giving up.")
                 raise TimeoutError(f"Scrape timed out after {SCRAPE_TIMEOUT}s")
 
         except Exception as exc:

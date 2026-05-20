@@ -219,7 +219,12 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
         except Exception as exc:
             return {"error": str(exc), "timestamp": datetime.now().isoformat()}
         finally:
-            await browser.close()
+            # browser.close() can hang if Chromium is unresponsive; cap it so the
+            # process always exits promptly and server.py's SCRAPE_TIMEOUT can fire.
+            try:
+                await asyncio.wait_for(browser.close(), timeout=10.0)
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
