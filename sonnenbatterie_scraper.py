@@ -46,7 +46,13 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
     """Login to my.sonnen.de and return scraped battery overview data as a dict."""
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
+        browser = await p.chromium.launch(
+            headless=headless,
+            # Prevent Chromium from using /dev/shm (limited in Docker).
+            # Writing large temp files to disk instead avoids shared-memory
+            # conflicts if a previous Chromium was killed uncleanly.
+            args=["--disable-dev-shm-usage"],
+        )
         context = await browser.new_context(
             locale="de-DE",
             viewport={"width": 1280, "height": 900},

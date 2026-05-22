@@ -55,6 +55,31 @@ _cache: dict = {"error": "First scrape still pending — please wait."}
 _started_at: str = datetime.now(timezone.utc).isoformat()
 
 
+async def _cleanup_orphan_processes() -> None:
+    """Kill stray Chromium processes left behind by a killed or crashed scraper.
+
+    On POSIX (Linux/Docker) only.  Playwright launches Chromium in its own
+    process group, so a killpg on the Python scraper does not always reach
+    Chromium.  Running pkill -9 -f chromium after every failed scrape ensures
+    no orphan can interfere with the next run via /dev/shm or IPC sockets.
+    pkill exits with 1 when no process matches, which we silently ignore.
+    """
+    if not _IS_POSIX:
+        return
+    _log.info("Cleaning up any orphaned Chromium processes...")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "pkill", "-9", "-f", "chromium",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.wait(), timeout=5.0)
+    except Exception:
+        pass
+    # Give the OS a moment to fully reap the killed processes.
+    await asyncio.sleep(1.0)
+
+
 async def _poll_loop() -> None:
     username = os.environ.get("SONNEN_USERNAME", "")
     password = os.environ.get("SONNEN_PASSWORD", "")
@@ -158,6 +183,12 @@ async def _poll_loop() -> None:
             _cache.clear()
             _cache["error"] = str(exc)
             _cache["timestamp"] = datetime.now(timezone.utc).isoformat()
+        finally:
+            # Always clean up orphaned browser processes before the next poll
+            # cycle.  For successful scrapes the pkill finds nothing and exits
+            # immediately; for failed/timed-out scrapes it ensures Chromium
+            # does not survive into the next scrape and cause a TargetClosedError.
+            await _cleanup_orphan_processes()
 
         await asyncio.sleep(POLL_INTERVAL)
 
