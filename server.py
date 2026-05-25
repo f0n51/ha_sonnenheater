@@ -16,8 +16,10 @@ Optional env vars:
 """
 
 import asyncio
+import glob
 import logging
 import os
+import shutil
 import signal
 import sys
 from contextlib import asynccontextmanager
@@ -56,13 +58,19 @@ _started_at: str = datetime.now(timezone.utc).isoformat()
 
 
 async def _cleanup_orphan_processes() -> None:
-    """Kill stray Chromium processes left behind by a killed or crashed scraper.
+    """Kill stray Chromium processes and remove leftover Playwright temp dirs.
 
     On POSIX (Linux/Docker) only.  Playwright launches Chromium in its own
     process group, so a killpg on the Python scraper does not always reach
     Chromium.  Running pkill -9 -f chromium after every failed scrape ensures
     no orphan can interfere with the next run via /dev/shm or IPC sockets.
     pkill exits with 1 when no process matches, which we silently ignore.
+
+    After killing processes we also remove /tmp/playwright_* directories.
+    When Chromium is killed with SIGKILL the scraper's finally-block never
+    runs, so Playwright cannot delete its own temp user-data-dir.  The orphaned
+    dir causes the *next* fresh Chromium launch to crash immediately with
+    TargetClosedError (seen as a persistent crash loop after a single timeout).
     """
     if not _IS_POSIX:
         return
@@ -78,6 +86,15 @@ async def _cleanup_orphan_processes() -> None:
         pass
     # Give the OS a moment to fully reap the killed processes.
     await asyncio.sleep(1.0)
+    # Remove leftover Playwright user-data-dir temp directories.  When
+    # Chromium is killed with SIGKILL the scraper process never gets to
+    # remove these, and the orphaned dirs can cause the next Chromium
+    # launch to crash immediately (TargetClosedError on new_page).
+    for _d in glob.glob("/tmp/playwright_*") + glob.glob("/tmp/.com.google.Chrome*"):
+        try:
+            shutil.rmtree(_d)
+        except Exception:
+            pass
 
 
 async def _poll_loop() -> None:
