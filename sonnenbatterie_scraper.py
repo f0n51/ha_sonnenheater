@@ -46,33 +46,34 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
     """Login to my.sonnen.de and return scraped battery overview data as a dict."""
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=headless,
-            # Prevent Chromium from using /dev/shm (limited in Docker).
-            # Writing large temp files to disk instead avoids shared-memory
-            # conflicts if a previous Chromium was killed uncleanly.
-            args=["--disable-dev-shm-usage"],
-        )
-        context = await browser.new_context(
-            locale="de-DE",
-            viewport={"width": 1280, "height": 900},
-        )
-        page = await context.new_page()
-
-        # Capture JSON API responses for transparency / future use
-        api_data: dict = {}
-
-        async def _capture_response(response):
-            if response.status == 200 and "sonnen.de" in response.url:
-                if "json" in response.headers.get("content-type", ""):
-                    try:
-                        api_data[response.url] = await response.json()
-                    except Exception:
-                        pass
-
-        page.on("response", _capture_response)
-
+        browser = None
         try:
+            browser = await p.chromium.launch(
+                headless=headless,
+                # Prevent Chromium from using /dev/shm (limited in Docker).
+                # Writing large temp files to disk instead avoids shared-memory
+                # conflicts if a previous Chromium was killed uncleanly.
+                args=["--disable-dev-shm-usage"],
+            )
+            context = await browser.new_context(
+                locale="de-DE",
+                viewport={"width": 1280, "height": 900},
+            )
+            page = await context.new_page()
+
+            # Capture JSON API responses for transparency / future use
+            api_data: dict = {}
+
+            async def _capture_response(response):
+                if response.status == 200 and "sonnen.de" in response.url:
+                    if "json" in response.headers.get("content-type", ""):
+                        try:
+                            api_data[response.url] = await response.json()
+                        except Exception:
+                            pass
+
+            page.on("response", _capture_response)
+
             # ── 1. Open page (redirects to login when unauthenticated) ───────
             _log.info("Opening %s ...", OVERVIEW_URL)
             await page.goto(OVERVIEW_URL, wait_until="domcontentloaded", timeout=30_000)
@@ -227,10 +228,11 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
         finally:
             # browser.close() can hang if Chromium is unresponsive; cap it so the
             # process always exits promptly and server.py's SCRAPE_TIMEOUT can fire.
-            try:
-                await asyncio.wait_for(browser.close(), timeout=10.0)
-            except Exception:
-                pass
+            if browser is not None:
+                try:
+                    await asyncio.wait_for(browser.close(), timeout=10.0)
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------

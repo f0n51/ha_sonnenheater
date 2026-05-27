@@ -90,11 +90,25 @@ async def _cleanup_orphan_processes() -> None:
     # Chromium is killed with SIGKILL the scraper process never gets to
     # remove these, and the orphaned dirs can cause the next Chromium
     # launch to crash immediately (TargetClosedError on new_page).
-    for _d in glob.glob("/tmp/playwright_*") + glob.glob("/tmp/.com.google.Chrome*"):
-        try:
-            shutil.rmtree(_d)
-        except Exception:
-            pass
+    # Cover all naming variants used across Playwright versions:
+    #   playwright_*  – older Python Playwright (underscore)
+    #   playwright-*  – newer Python Playwright (dash)
+    #   .com.google.Chrome* / .org.chromium.* – Chrome profile locks
+    #   Crashpad* / crash_* – Crashpad sockets/files
+    _cleanup_patterns = [
+        "/tmp/playwright_*",
+        "/tmp/playwright-*",
+        "/tmp/.com.google.Chrome*",
+        "/tmp/.org.chromium.*",
+        "/tmp/Crashpad*",
+        "/tmp/crash_*",
+    ]
+    for _pattern in _cleanup_patterns:
+        for _d in glob.glob(_pattern):
+            try:
+                shutil.rmtree(_d, ignore_errors=True)
+            except Exception:
+                pass
 
 
 async def _poll_loop() -> None:
