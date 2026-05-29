@@ -2,6 +2,7 @@ services:
   sonnen-scraper:
     image: ghcr.io/f0n51/ha_sonnenheater:latest
     build: .
+    init: true           # inject tini as PID 1 so zombie grandchildren are reaped
     env_file:
       - .env          # copy .env.example → .env and fill in credentials
     environment:

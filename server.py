@@ -75,17 +75,35 @@ async def _cleanup_orphan_processes() -> None:
     if not _IS_POSIX:
         return
     _log.info("Cleaning up any orphaned Chromium processes...")
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "pkill", "-9", "-f", "chromium",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await asyncio.wait_for(proc.wait(), timeout=5.0)
-    except Exception:
-        pass
+    # Kill all Chrome/Chromium-related processes.  Two passes:
+    #   1. by path substring "chromium" — matches the headless-shell binary via its dir name
+    #   2. by binary name "chrome-headless-shell" — belt-and-suspenders for any process
+    #      whose cmdline doesn't carry the parent directory
+    for _pattern in ("chromium", "chrome-headless-shell", "chrome-sandbox"):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "pkill", "-9", "-f", _pattern,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except Exception:
+            pass
     # Give the OS a moment to fully reap the killed processes.
     await asyncio.sleep(1.0)
+    # Reap any zombie grandchildren that were reparented to us.
+    # When server.py runs as PID 1 it acts as the reaper for orphaned processes;
+    # without this loop those zombies accumulate and eventually exhaust the
+    # process table, causing pthread_create to fail with EAGAIN in Chromium.
+    if _IS_POSIX:
+        _wnohang = getattr(os, "WNOHANG", 1)  # POSIX-only constant; 1 is the Linux value
+        while True:
+            try:
+                pid, _ = os.waitpid(-1, _wnohang)
+                if pid == 0:
+                    break
+            except ChildProcessError:
+                break
     # Remove leftover Playwright user-data-dir temp directories.  When
     # Chromium is killed with SIGKILL the scraper process never gets to
     # remove these, and the orphaned dirs can cause the next Chromium
