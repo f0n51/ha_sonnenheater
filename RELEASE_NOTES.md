@@ -1,5 +1,18 @@
 # Release Notes
 
+## v1.1.3 — Bugfix (Chromium crash loop & cleanup)
+
+**Released:** 2026-06-02
+
+### Bug fixes
+
+- **Kill orphaned Chromium after scrape timeout** — after a scrape timed out, a lingering Chromium process caused a `TargetClosedError` on the next run; orphaned Chromium processes are now forcibly killed before starting a new scrape.
+- **Prevent crash loop after SIGKILL'd scrape subprocess** — the scraper no longer enters an infinite crash loop when the subprocess is SIGKILL'd; recovery handling was added to resume the poll loop cleanly.
+- **Remove leftover temp dirs** — temporary directories created by Playwright/Chromium are now cleaned up after each scrape run.
+- **Docker Compose `init` flag & broader cleanup** — added the `init` flag to the Docker Compose service definition so PID 1 properly reaps zombie processes.
+
+---
+
 ## v1.1.2 — Bugfix (Playwright Version)
 
 **Released:** 2026-04-30
@@ -8,6 +21,8 @@
 
 - **Playwright / Chromium dies with SIGTRAP** ([#4](https://github.com/f0n51/ha_sonnenheater/issues/4)) — bumped Playwright version to 1.58.0 in requirements.txt to match the docker container's Playwright version.
 
+---
+
 ## v1.1.1 — Bugfix (Scraper)
 
 **Released:** 2026-04-28
@@ -15,6 +30,8 @@
 ### Bug fix
 
 - **Scraper no longer gets stuck on portal downtime or empty responses** ([#2](https://github.com/f0n51/ha_sonnenheater/issues/2)) — added `SCRAPE_TIMEOUT` enforcement via `asyncio.wait_for`; a hung Playwright session is now forcibly cancelled after the configured timeout, the error is written to the cache, and the poll loop continues normally.
+
+---
 
 ## v1.1.0 — Reliability & Reconfiguration
 
