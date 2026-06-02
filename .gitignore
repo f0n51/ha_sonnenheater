@@ -34,3 +34,6 @@ docker-compose.override.yml
 .vscode/
 .idea/
 *.swp
+
+# others
+.notes/

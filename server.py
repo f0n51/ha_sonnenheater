@@ -10,14 +10,18 @@ Usage:
     python server.py
 
 Optional env vars:
-    POLL_INTERVAL_SECONDS   How often to re-scrape (default: 300)
+    POLL_INTERVAL_SECONDS   How often to re-scrape (default: 120)
     SERVER_PORT             TCP port to listen on  (default: 8099)
     SERVER_HOST             Bind address           (default: 0.0.0.0)
 """
 
 import asyncio
+import glob
 import logging
 import os
+import shutil
+import signal
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -36,8 +40,15 @@ _log = logging.getLogger(__name__)
 
 import json
 
+# On POSIX (Linux/Docker) we can kill the entire process group so orphaned
+# Chromium children don't accumulate and exhaust memory after repeated timeouts.
+_IS_POSIX = hasattr(os, "killpg")
+_killpg = getattr(os, "killpg", None)      # POSIX only
+_SIGTERM = getattr(signal, "SIGTERM", 15)  # always present, but satisfy type checker
+_SIGKILL = getattr(signal, "SIGKILL", 9)   # POSIX only
+
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SECONDS", "120"))
-SCRAPE_TIMEOUT = int(os.environ.get("SCRAPE_TIMEOUT_SECONDS", "120"))
+SCRAPE_TIMEOUT = int(os.environ.get("SCRAPE_TIMEOUT_SECONDS", "60"))
 SERVER_PORT = int(os.environ.get("SERVER_PORT", "8099"))
 SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
 LOG_SCRAPED_DATA = os.environ.get("LOG_SCRAPED_DATA", "").lower() in ("1", "true", "yes")
@@ -46,42 +57,188 @@ _cache: dict = {"error": "First scrape still pending — please wait."}
 _started_at: str = datetime.now(timezone.utc).isoformat()
 
 
+async def _cleanup_orphan_processes() -> None:
+    """Kill stray Chromium processes and remove leftover Playwright temp dirs.
+
+    On POSIX (Linux/Docker) only.  Playwright launches Chromium in its own
+    process group, so a killpg on the Python scraper does not always reach
+    Chromium.  Running pkill -9 -f chromium after every failed scrape ensures
+    no orphan can interfere with the next run via /dev/shm or IPC sockets.
+    pkill exits with 1 when no process matches, which we silently ignore.
+
+    After killing processes we also remove /tmp/playwright_* directories.
+    When Chromium is killed with SIGKILL the scraper's finally-block never
+    runs, so Playwright cannot delete its own temp user-data-dir.  The orphaned
+    dir causes the *next* fresh Chromium launch to crash immediately with
+    TargetClosedError (seen as a persistent crash loop after a single timeout).
+    """
+    if not _IS_POSIX:
+        return
+    _log.info("Cleaning up any orphaned Chromium processes...")
+    # Kill all Chrome/Chromium-related processes.  Two passes:
+    #   1. by path substring "chromium" — matches the headless-shell binary via its dir name
+    #   2. by binary name "chrome-headless-shell" — belt-and-suspenders for any process
+    #      whose cmdline doesn't carry the parent directory
+    for _pattern in ("chromium", "chrome-headless-shell", "chrome-sandbox"):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "pkill", "-9", "-f", _pattern,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except Exception:
+            pass
+    # Give the OS a moment to fully reap the killed processes.
+    await asyncio.sleep(1.0)
+    # Reap any zombie grandchildren that were reparented to us.
+    # When server.py runs as PID 1 it acts as the reaper for orphaned processes;
+    # without this loop those zombies accumulate and eventually exhaust the
+    # process table, causing pthread_create to fail with EAGAIN in Chromium.
+    if _IS_POSIX:
+        _wnohang = getattr(os, "WNOHANG", 1)  # POSIX-only constant; 1 is the Linux value
+        while True:
+            try:
+                pid, _ = os.waitpid(-1, _wnohang)
+                if pid == 0:
+                    break
+            except ChildProcessError:
+                break
+    # Remove leftover Playwright user-data-dir temp directories.  When
+    # Chromium is killed with SIGKILL the scraper process never gets to
+    # remove these, and the orphaned dirs can cause the next Chromium
+    # launch to crash immediately (TargetClosedError on new_page).
+    # Cover all naming variants used across Playwright versions:
+    #   playwright_*  – older Python Playwright (underscore)
+    #   playwright-*  – newer Python Playwright (dash)
+    #   .com.google.Chrome* / .org.chromium.* – Chrome profile locks
+    #   Crashpad* / crash_* – Crashpad sockets/files
+    _cleanup_patterns = [
+        "/tmp/playwright_*",
+        "/tmp/playwright-*",
+        "/tmp/.com.google.Chrome*",
+        "/tmp/.org.chromium.*",
+        "/tmp/Crashpad*",
+        "/tmp/crash_*",
+    ]
+    for _pattern in _cleanup_patterns:
+        for _d in glob.glob(_pattern):
+            try:
+                shutil.rmtree(_d, ignore_errors=True)
+            except Exception:
+                pass
+
+
 async def _poll_loop() -> None:
     username = os.environ.get("SONNEN_USERNAME", "")
     password = os.environ.get("SONNEN_PASSWORD", "")
 
     if not username or not password:
-        _log.error(
-            "SONNEN_USERNAME / SONNEN_PASSWORD not set — scraper will not run."
-        )
+        _log.error("SONNEN_USERNAME / SONNEN_PASSWORD not set — scraper will not run.")
         return
 
+    # Pass credentials via env vars so they don't show up in process lists (ps aux)
+    env = os.environ.copy()
+    env["SONNEN_USERNAME"] = username
+    env["SONNEN_PASSWORD"] = password
+
     while True:
-        _log.info("Starting scrape …")
+        _log.info("Starting isolated scrape process...")
         try:
-            data = await asyncio.wait_for(scrape(username, password), timeout=SCRAPE_TIMEOUT)
-            _cache.clear()
-            _cache.update(data)
-            _log.info("Scrape complete. timestamp=%s", _cache.get("timestamp"))
-            if not data.get("battery_info") and not data.get("sonnen_heater"):
-                _log.warning(
-                    "Scrape returned empty data — both battery_info and sonnen_heater are empty. "
-                    "Captured API URLs may have been missing. Check scraper logs above."
+            # Launch scraper in its own process group (POSIX) so that
+            # a timeout kill reaches Chromium children too.
+            if _IS_POSIX:
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable, "sonnenbatterie_scraper.py",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
+                    start_new_session=True,
                 )
-            elif not data.get("battery_info"):
-                _log.warning("Scrape returned empty battery_info.")
-            elif not data.get("sonnen_heater"):
-                _log.warning("Scrape returned empty sonnen_heater.")
-            if LOG_SCRAPED_DATA:
-                _log.info("Scraped data:\n%s", json.dumps(data, indent=2, ensure_ascii=False))
-        except Exception as exc:  # noqa: BLE001
-            if isinstance(exc, asyncio.TimeoutError):
-                _log.error("Scrape timed out after %s s — Playwright likely hung. Retrying after sleep.", SCRAPE_TIMEOUT)
             else:
-                _log.error("Scrape failed: %s", exc)
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable, "sonnenbatterie_scraper.py",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
+                )
+
+            try:
+                # Wait for the process with a timeout
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=SCRAPE_TIMEOUT)
+                
+                # Stream stderr out to our server's logs
+                scraper_stderr = stderr.decode(errors="replace").strip()
+                if scraper_stderr:
+                    for line in scraper_stderr.splitlines():
+                        _log.info("[scraper] %s", line)
+
+                if process.returncode != 0:
+                    _log.error("Scraper process failed (exit code %s).", process.returncode)
+                    _log.error("--- STDERR ---\n%s", stderr.decode(errors="replace").strip())
+                    _log.error("--- STDOUT ---\n%s", stdout.decode(errors="replace").strip())
+                    raise RuntimeError(f"Scraper exited with code {process.returncode}")
+
+                # Parse the JSON output printed by sonnenbatterie_scraper.py's CLI
+                raw_stdout = stdout.decode(errors="replace").strip()
+                try:
+                    data = json.loads(raw_stdout)
+                except json.JSONDecodeError as e:
+                    _log.error("Failed to parse scraper output as JSON. Error: %s", e)
+                    _log.error("Raw scraper output:\n%s", raw_stdout)
+                    raise RuntimeError("Scraper returned invalid JSON")
+                
+                _cache.clear()
+                _cache.update(data)
+                _log.info("Scrape complete. timestamp=%s", _cache.get("timestamp"))
+                
+                if "error" in data:
+                    _log.warning("Scrape returned an internal error: %s", data["error"])
+                elif not data.get("battery_info") and not data.get("sonnen_heater"):
+                    _log.warning("Scrape returned empty data — both battery_info and sonnen_heater are empty.")
+                    
+                if LOG_SCRAPED_DATA:
+                    _log.info("Scraped data:\n%s", json.dumps(data, indent=2, ensure_ascii=False))
+
+            except asyncio.TimeoutError:
+                _log.error("Scrape timed out after %s s — killing subprocess tree...", SCRAPE_TIMEOUT)
+                pgid = process.pid  # start_new_session=True → pgid == pid on POSIX
+                try:
+                    if _IS_POSIX and _killpg:
+                        try:
+                            _killpg(pgid, _SIGTERM)
+                        except ProcessLookupError:
+                            pass
+                    else:
+                        process.terminate()
+                    await asyncio.wait_for(process.wait(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    _log.warning("Subprocess tree ignored SIGTERM, forcing SIGKILL...")
+                    try:
+                        if _IS_POSIX and _killpg:
+                            _killpg(pgid, _SIGKILL)
+                        else:
+                            process.kill()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        _log.warning("Subprocess still alive after SIGKILL — giving up.")
+                raise TimeoutError(f"Scrape timed out after {SCRAPE_TIMEOUT}s")
+
+        except Exception as exc:
+            _log.error("Scrape failed: %s", exc)
             _cache.clear()
-            _cache["error"] = str(exc) if not isinstance(exc, asyncio.TimeoutError) else f"Scrape timed out after {SCRAPE_TIMEOUT}s"
+            _cache["error"] = str(exc)
             _cache["timestamp"] = datetime.now(timezone.utc).isoformat()
+        finally:
+            # Always clean up orphaned browser processes before the next poll
+            # cycle.  For successful scrapes the pkill finds nothing and exits
+            # immediately; for failed/timed-out scrapes it ensures Chromium
+            # does not survive into the next scrape and cause a TargetClosedError.
+            await _cleanup_orphan_processes()
+
         await asyncio.sleep(POLL_INTERVAL)
 
 

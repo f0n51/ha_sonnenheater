@@ -46,27 +46,34 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
     """Login to my.sonnen.de and return scraped battery overview data as a dict."""
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
-        context = await browser.new_context(
-            locale="de-DE",
-            viewport={"width": 1280, "height": 900},
-        )
-        page = await context.new_page()
-
-        # Capture JSON API responses for transparency / future use
-        api_data: dict = {}
-
-        async def _capture_response(response):
-            if response.status == 200 and "sonnen.de" in response.url:
-                if "json" in response.headers.get("content-type", ""):
-                    try:
-                        api_data[response.url] = await response.json()
-                    except Exception:
-                        pass
-
-        page.on("response", _capture_response)
-
+        browser = None
         try:
+            browser = await p.chromium.launch(
+                headless=headless,
+                # Prevent Chromium from using /dev/shm (limited in Docker).
+                # Writing large temp files to disk instead avoids shared-memory
+                # conflicts if a previous Chromium was killed uncleanly.
+                args=["--disable-dev-shm-usage"],
+            )
+            context = await browser.new_context(
+                locale="de-DE",
+                viewport={"width": 1280, "height": 900},
+            )
+            page = await context.new_page()
+
+            # Capture JSON API responses for transparency / future use
+            api_data: dict = {}
+
+            async def _capture_response(response):
+                if response.status == 200 and "sonnen.de" in response.url:
+                    if "json" in response.headers.get("content-type", ""):
+                        try:
+                            api_data[response.url] = await response.json()
+                        except Exception:
+                            pass
+
+            page.on("response", _capture_response)
+
             # ── 1. Open page (redirects to login when unauthenticated) ───────
             _log.info("Opening %s ...", OVERVIEW_URL)
             await page.goto(OVERVIEW_URL, wait_until="domcontentloaded", timeout=30_000)
@@ -78,47 +85,43 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
             except PlaywrightTimeoutError:
                 pass  # SPA polls continuously; proceed after timeout
 
-            # ── 3. Login if the login form is now visible ─────────────────────
-            # Use wait_for_selector so the SPA has time to render before we decide
-            # whether login is needed (instantaneous count() check was too early).
-            try:
-                await page.wait_for_selector(
-                    '[data-testid="login-email"], input[type="email"]',
-                    timeout=15_000,
-                )
-                login_form_visible = True
-            except PlaywrightTimeoutError:
-                login_form_visible = False  # already authenticated
+            # ── 3. Authenticate ───────────────────────────────────────────────
+            _log.info("Waiting for login form ...")
+            # The context is always fresh, so we strictly require the login form to appear.
+            # If this times out, the script will naturally raise PlaywrightTimeoutError and exit.
+            await page.wait_for_selector(
+                '[data-testid="login-email"], input[type="email"]',
+                timeout=15_000,
+            )
 
             login_email = page.locator('[data-testid="login-email"], input[type="email"]')
-            if login_form_visible:
-                _log.info("Login required — filling credentials ...")
+            _log.info("Filling credentials ...")
 
-                # Dismiss cookie/consent banner if present
-                try:
-                    consent = page.locator(
-                        "#onetrust-accept-btn-handler, "
-                        "button:has-text('Akzeptieren'), "
-                        "button:has-text('Accept All')"
-                    )
-                    if await consent.count() > 0:
-                        await consent.first.click()
-                        await page.wait_for_timeout(500)
-                except Exception:
-                    pass
+            # Dismiss cookie/consent banner if present
+            try:
+                consent = page.locator(
+                    "#onetrust-accept-btn-handler, "
+                    "button:has-text('Akzeptieren'), "
+                    "button:has-text('Accept All')"
+                )
+                if await consent.count() > 0:
+                    await consent.first.click()
+                    await page.wait_for_timeout(500)
+            except Exception:
+                pass
 
-                await login_email.first.fill(username)
+            await login_email.first.fill(username)
+            await page.locator(
+                '[data-testid="login-password"], input[type="password"]'
+            ).first.fill(password)
+
+            async with page.expect_navigation(wait_until="domcontentloaded", timeout=30_000):
                 await page.locator(
-                    '[data-testid="login-password"], input[type="password"]'
-                ).first.fill(password)
-
-                async with page.expect_navigation(wait_until="domcontentloaded", timeout=30_000):
-                    await page.locator(
-                        '[data-testid="login-submit-btn"], input[type="submit"], button[type="submit"]'
-                    ).first.click()
-                _log.info("Credentials submitted — waiting for page to reload ...")
-                # SPA polls continuously so networkidle may never fire; wait for load instead
-                await page.wait_for_load_state("load", timeout=30_000)
+                    '[data-testid="login-submit-btn"], input[type="submit"], button[type="submit"]'
+                ).first.click()
+            _log.info("Credentials submitted — waiting for page to reload ...")
+            # SPA polls continuously so networkidle may never fire; wait for load instead
+            await page.wait_for_load_state("load", timeout=30_000)
 
             # ── 4. Navigate to overview if we ended up elsewhere ─────────────
             if "battery/overview" not in page.url:
@@ -223,7 +226,13 @@ async def scrape(username: str, password: str, headless: bool = True, debug: boo
         except Exception as exc:
             return {"error": str(exc), "timestamp": datetime.now().isoformat()}
         finally:
-            await browser.close()
+            # browser.close() can hang if Chromium is unresponsive; cap it so the
+            # process always exits promptly and server.py's SCRAPE_TIMEOUT can fire.
+            if browser is not None:
+                try:
+                    await asyncio.wait_for(browser.close(), timeout=10.0)
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +285,14 @@ Environment variables (alternative to flags):
             "Pass --username/-u and --password/-p, "
             "or set SONNEN_USERNAME / SONNEN_PASSWORD environment variables."
         )
+
+    # Configure logging to stderr so it doesn't pollute JSON stdout
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
 
     data = asyncio.run(scrape(username, password, headless=not args.visible, debug=args.debug))
 
